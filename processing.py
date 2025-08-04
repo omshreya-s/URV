@@ -1,7 +1,7 @@
 import pandas as pd
 
 # load EDA data
-base_path = r"engaged task(normal sitting)  (1)\july16_sarna_p1 (1)\EMOTIBIT (1)\2025-07-16_18-00-15-608675"
+base_path = r"data\engaged task(normal sitting)  (1)\july10_day1 (1)\emotibit (1)\2025-07-10_15-09-52-005859"
 ea_file = base_path + "_EA.csv"
 sa_file = base_path + "_SA.csv"
 sf_file = base_path + "_SF.csv"
