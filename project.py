@@ -170,7 +170,6 @@ for file in relaxed_filenames:
     y = x[1].split("\\")
 
     hr_name ="relaxed_HR" + "\\" + y[1] +"_" + x[2]+ "_HR.csv"
-    print(hr_name)
     
     #extracting hr features
     hr_df = pd.DataFrame(hr_detection(hr_name), index = [0])
