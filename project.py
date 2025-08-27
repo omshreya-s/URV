@@ -215,70 +215,80 @@ def pred_tree(frames):
     X = frames.drop('label', axis=1)  # drops 'label' column
     y = frames['label']
 
-    # define subject-wise z-score
-    def subjectwise_zscore(X_df, subj_series):
-        Xc = X_df.copy()
-        cols = Xc.columns
-        vals = Xc.values.astype(float)
-        S = subj_series.values
-        for s in np.unique(S):
-            idx = (S == s)
-            if idx.sum() == 0:
-                continue
-            mu = vals[idx].mean(axis=0)
-            sd = vals[idx].std(axis=0, ddof=0)
-            sd[sd == 0] = 1.0
-            vals[idx] = (vals[idx] - mu) / sd
-        return pd.DataFrame(vals, columns=cols, index=X_df.index)
+    def compute_subjectwise_norm_params(X_df, subj_series):
+        params = {}
+        for s in np.unique(subj_series):
+            idx = (subj_series == s)
+            mu = X_df.loc[idx].mean(axis=0)
+            sd = X_df.loc[idx].std(axis=0, ddof=0)
+            sd[sd == 0] = 1.0  # Avoid division by zero
+            params[s] = (mu, sd)
+        return params
 
+    def apply_subjectwise_zscore(X_df, subj_series, norm_params):
+        Xc = X_df.copy()
+        for s in np.unique(subj_series):
+            idx = (subj_series == s)
+            if s in norm_params:
+                mu, sd = norm_params[s]
+                Xc.loc[idx, :] = (Xc.loc[idx, :] - mu) / sd
+            else:
+                # Subject not seen in training, fallback: optionally use global mean/std or leave as is
+                # Here, we leave data unchanged; you can choose a better fallback as needed
+                pass
+        return Xc
+
+    # Split data into train and test (random stratified split)
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=42
     )
 
+    # Ensure 'subject_id' column exists
     if 'subject_id' not in X_train.columns:
         raise ValueError("Lack subject_id column")
 
-    subj_train = X_train['subject_id']     # [NEW]
-    subj_test  = X_test['subject_id']      # [NEW]
+    # Extract subject IDs for train and test
+    subj_train = X_train['subject_id']
+    subj_test = X_test['subject_id']
 
+    # Drop 'subject_id' from feature sets
     X_train_feat = X_train.drop(columns=['subject_id'])
-    X_test_feat  = X_test.drop(columns=['subject_id'])
+    X_test_feat = X_test.drop(columns=['subject_id'])
 
-    X_train_norm = subjectwise_zscore(X_train_feat, subj_train)
-    X_test_norm  = subjectwise_zscore(X_test_feat, subj_test)
+    # Compute normalization parameters on training data only
+    norm_params = compute_subjectwise_norm_params(X_train_feat, subj_train)
 
+    # Apply normalization to train and test sets using training params
+    X_train_norm = apply_subjectwise_zscore(X_train_feat, subj_train, norm_params)
+    X_test_norm = apply_subjectwise_zscore(X_test_feat, subj_test, norm_params)
+
+    # Train Decision Tree Classifier
     dt_model = DecisionTreeClassifier(criterion='entropy', max_depth=3)
-
-    # trains model
     dt_model.fit(X_train_norm, y_train)
-
-    # predicts 'y' values with test 'x' values
     y_pred = dt_model.predict(X_test_norm)
-
-    # checks accuracy of predicted 'y' against true 'y'
     acc = accuracy_score(y_test, y_pred)
 
-    # precision, recall, f1 score
     print(classification_report(y_test, y_pred))
     print("Decision Tree Accuracy:", acc)
     print("--------------------------------------------")
 
+    # Train Random Forest Classifier
     rf_model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight="balanced")
     rf_model.fit(X_train_norm, y_train)
     rf_pred = rf_model.predict(X_test_norm)
 
     print(classification_report(y_test, rf_pred))
 
-    # confusion matrix
+    # Confusion matrix and plot
     rf_cm = confusion_matrix(y_test, rf_pred, labels=rf_model.classes_)
     disp2 = ConfusionMatrixDisplay.from_predictions(y_test, rf_pred, display_labels=rf_model.classes_, cmap="BuGn")
     disp2.plot()
 
     print("Random Forest Accuracy:", accuracy_score(y_test, rf_pred))
 
-    print(X_train_norm.columns) 
+    print(X_train_norm.columns)
 
-    # Built-in feature importance (Gini Importance)
+    # Feature importance from Random Forest
     importances = rf_model.feature_importances_
     feature_imp_df = pd.DataFrame({'Feature': X_train_norm.columns, 'Gini Importance': importances}).sort_values('Gini Importance', ascending=False)
     print(feature_imp_df)
@@ -288,7 +298,126 @@ def pred_tree(frames):
     plt.barh(feature_imp_df.iloc[:topk]['Feature'], feature_imp_df.iloc[:topk]['Gini Importance'], color='lightblue')
     plt.xlabel('Gini Importance')
     plt.title('Feature Importance - Gini Importance')
-    plt.gca().invert_yaxis()  # Invert y-axis for better visualization
+    plt.gca().invert_yaxis()
+    plt.show()
+
+def pred_tree_LOSO(frames):
+    if 'subject_id' not in frames.columns:
+        raise ValueError("Lack subject_id column")
+
+    subjects = frames['subject_id'].unique()
+    
+    acc_results_dt = []
+    acc_results_rf = []
+    all_y_true = []
+    all_y_pred_dt = []
+    all_y_pred_rf = []
+    
+    # Initialize feature importance accumulator for RF
+    feature_importance_accum = None
+    feature_names = None
+    
+    def compute_subjectwise_norm_params(X_df, subj_series):
+        params = {}
+        for s in np.unique(subj_series):
+            idx = (subj_series == s)
+            mu = X_df.loc[idx].mean(axis=0)
+            sd = X_df.loc[idx].std(axis=0, ddof=0)
+            sd[sd==0] = 1.0
+            params[s] = (mu, sd)
+        return params
+
+    def apply_subjectwise_zscore(X_df, subj_series, norm_params):
+        Xc = X_df.copy()
+        for s in np.unique(subj_series):
+            idx = (subj_series == s)
+            if s in norm_params:
+                mu, sd = norm_params[s]
+                Xc.loc[idx, :] = (Xc.loc[idx, :] - mu) / sd
+            else:
+                # If subject not in training norm params, leave as is or apply global mean/std if desired
+                pass
+        return Xc
+
+    for test_subj in subjects:
+        # Split data into train (all other subjects) and test (left-out subject)
+        train_data = frames[frames['subject_id'] != test_subj]
+        test_data = frames[frames['subject_id'] == test_subj]
+
+        X_train = train_data.drop(columns=['label'])
+        y_train = train_data['label']
+        subj_train = X_train['subject_id']
+        X_train_feat = X_train.drop(columns=['subject_id'])
+
+        X_test = test_data.drop(columns=['label'])
+        y_test = test_data['label']
+        subj_test = X_test['subject_id']
+        X_test_feat = X_test.drop(columns=['subject_id'])
+
+        # Compute normalization params on training data
+        norm_params = compute_subjectwise_norm_params(X_train_feat, subj_train)
+
+        # Normalize training and test data using training normalization params
+        X_train_norm = apply_subjectwise_zscore(X_train_feat, subj_train, norm_params)
+        X_test_norm = apply_subjectwise_zscore(X_test_feat, subj_test, norm_params)
+
+        # Train Decision Tree
+        dt_model = DecisionTreeClassifier(criterion='entropy', max_depth=3)
+        dt_model.fit(X_train_norm, y_train)
+        y_pred_dt = dt_model.predict(X_test_norm)
+        acc_dt = accuracy_score(y_test, y_pred_dt)
+        acc_results_dt.append(acc_dt)
+
+        # Train Random Forest
+        rf_model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight="balanced")
+        rf_model.fit(X_train_norm, y_train)
+        y_pred_rf = rf_model.predict(X_test_norm)
+        acc_rf = accuracy_score(y_test, y_pred_rf)
+        acc_results_rf.append(acc_rf)
+
+        # Aggregate ground truth and predictions for overall metrics later
+        all_y_true.extend(y_test)
+        all_y_pred_dt.extend(y_pred_dt)
+        all_y_pred_rf.extend(y_pred_rf)
+
+        # Accumulate feature importances for RF
+        if feature_importance_accum is None:
+            feature_importance_accum = rf_model.feature_importances_
+            feature_names = X_train_norm.columns
+        else:
+            feature_importance_accum += rf_model.feature_importances_
+
+        print(f"Subject {test_subj} left out:")
+        print(f"  Decision Tree Accuracy: {acc_dt:.4f}")
+        print(f"  Random Forest Accuracy: {acc_rf:.4f}")
+        print("-------------------------------")
+
+    # Overall performance
+    print("===== Overall Decision Tree Classification Report =====")
+    print(classification_report(all_y_true, all_y_pred_dt))
+    print("===== Overall Random Forest Classification Report =====")
+    print(classification_report(all_y_true, all_y_pred_rf))
+
+    print(f"Mean Decision Tree Accuracy (LOSO): {np.mean(acc_results_dt):.4f}")
+    print(f"Mean Random Forest Accuracy (LOSO): {np.mean(acc_results_rf):.4f}")
+
+    # Average feature importance over folds
+    avg_feature_importance = feature_importance_accum / len(subjects)
+    feature_imp_df = pd.DataFrame({'Feature': feature_names, 'Avg Gini Importance': avg_feature_importance}).sort_values('Avg Gini Importance', ascending=False)
+    print(feature_imp_df)
+
+    plt.figure(figsize=(8, 4))
+    topk = min(10, len(feature_imp_df))
+    plt.barh(feature_imp_df.iloc[:topk]['Feature'], feature_imp_df.iloc[:topk]['Avg Gini Importance'], color='lightblue')
+    plt.xlabel('Average Gini Importance')
+    plt.title('Feature Importance - Average Gini Importance (LOSO)')
+    plt.gca().invert_yaxis()
+    plt.show()
+
+    # Confusion matrix for Random Forest overall predictions
+    disp = ConfusionMatrixDisplay.from_predictions(all_y_true, all_y_pred_rf, cmap="BuGn")
+    disp.plot()
+    plt.title("Random Forest Confusion Matrix - Overall (LOSO)")
     plt.show()
 
 def process_feature(state, feature, x, y, fs_eda):
