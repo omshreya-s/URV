@@ -305,7 +305,7 @@ def process_feature(state, feature, x, y, fs_eda):
 
     return time_up, signal_up
 
-def read_files(files, label, data, fs_eda, window_sec, overlap):
+def read_files(files, label, data_frame, fs_eda, window_sec, overlap):
     for file in files:
         subj = Path(file).stem  
         time_ea, ea_filtered = ea_detection(file, fs=fs_eda)
@@ -327,10 +327,13 @@ def read_files(files, label, data, fs_eda, window_sec, overlap):
 
         if not windowed_df.empty:
             windowed_df["subject_id"] = subj
-            data = pd.concat([data, windowed_df], ignore_index=True)
+            data_frame = pd.concat([data_frame, windowed_df], ignore_index=True)
+            print(f"{len(data_frame)}")
         else:
             print(f"Warning: No valid windows extracted from {label} file {file}")
+    return data_frame
 
+# replace the "\\" with "/" if file not found
 def main():
     fs_eda = 15
     window_sec = 10
@@ -340,13 +343,14 @@ def main():
 
     # Engaged files
     engaged_filenames = glob.glob("engaged_EA/*.csv")
-    read_files(engaged_filenames, "engaged", data, fs_eda, window_sec, overlap)
-
+    data = read_files(engaged_filenames, "engaged", data, fs_eda, window_sec, overlap)
+    print(f"Total samples: {len(data)}")
+    
     # Relaxed files
     relaxed_filenames = glob.glob("relaxed_EA/*.csv")
-    read_files(relaxed_filenames, "relaxed", data, fs_eda, window_sec, overlap)
+    data = read_files(relaxed_filenames, "relaxed", data, fs_eda, window_sec, overlap)
 
-    # print(f"Total samples: {len(data)}")
+    print(f"Total samples: {len(data)}")
     pred_tree(data)
 
 if __name__ == '__main__':
